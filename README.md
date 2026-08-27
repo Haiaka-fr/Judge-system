@@ -1,7 +1,6 @@
 # Python Judge System - Python 程式批改系統
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![C++](https://img.shields.io/badge/C++-11/14/17-00599C.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
 ---

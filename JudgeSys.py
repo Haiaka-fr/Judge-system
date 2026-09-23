@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 import threading
 import os
 import sys
+import multiprocessing # avoid multi processing
 
 COLORS = {
     "bg": "#F5F7F8",
@@ -20,7 +21,7 @@ class GraderApp:
     def __init__(self, root):
         self.root = root
         self.root.title("程式評分系統")
-        self.root.geometry("9000x950")
+        self.root.geometry("900x950")
         self.root.configure(bg=COLORS["bg"])
         self.grading = False
         
@@ -60,11 +61,6 @@ class GraderApp:
         self.time_limit_entry = tk.Entry(settings_frame, width=10, font=self.default_font)
         self.time_limit_entry.insert(0, "10.0")
         self.time_limit_entry.grid(row=0, column=1, padx=10, sticky="w")
-
-        tk.Label(settings_frame, text="顯示標題:").grid(row=1, column=0, sticky="w", pady=5)
-        self.Title = tk.Entry(settings_frame, width=40, font=self.default_font)
-        self.Title.insert(0, "Title")
-        self.Title.grid(row=1, column=1, padx=10, sticky="w")
 
         # 控制按鈕
         btn_frame = tk.Frame(container, bg=COLORS["bg"])
@@ -160,6 +156,24 @@ class GraderApp:
         self.log(f"時間限制: {timeout_limit}s")
         self.log("-" * 60)
 
+        if getattr(sys, 'frozen', False):
+            python_exe = "python"
+        else:
+            python_exe = sys.executable
+
+        env = os.environ.copy()
+        if "PYTHONHOME" in env: del env["PYTHONHOME"]
+        if "PYTHONPATH" in env: del env["PYTHONPATH"]
+        if "_MEI_PATH" in env: del env["_MEI_PATH"]
+
+        runner_code = (
+            "import time, sys; "
+            "t0 = time.perf_counter(); "
+            "exec(open(sys.argv[1], encoding='utf-8').read()); "
+            "t1 = time.perf_counter(); "
+            "print(f'\\n__TIME__:{t1 - t0:.6f}')"
+        )
+
         for i, (inp, exp) in enumerate(segments):
             inp, exp = inp.strip(), exp.strip()
             status = ""
@@ -167,13 +181,25 @@ class GraderApp:
             duration = 0.0
 
             try:
-                process = subprocess.Popen([sys.executable, script_name], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                start_time = time.perf_counter()
+                process = subprocess.Popen(
+                    [python_exe, "-c", runner_code, script_name],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env
+                )
                 try:
                     stdout, stderr = process.communicate(input=inp, timeout=timeout_limit)
-                    duration = time.perf_counter() - start_time
-                    actual = stdout.strip()
                     
+                    if "__TIME__:" in stdout:
+                        raw_output, time_part = stdout.rsplit("__TIME__:", 1)
+                        actual = raw_output.rstrip("\r\n")
+                        duration = float(time_part.strip())
+                    else:
+                        actual = stdout.strip()
+                        duration = 0.0
+
                     if actual == exp:
                         status = "✅ PASS"
                         passed_count += 1
@@ -201,6 +227,8 @@ class GraderApp:
         self.grading = False
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
     root = tk.Tk()
     app = GraderApp(root)
     root.mainloop()

@@ -6,7 +6,8 @@ from tkinter import filedialog, messagebox, ttk
 import threading
 import os
 import sys
-import multiprocessing # avoid multi processing
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 COLORS = {
     "bg": "#F5F7F8",
@@ -20,13 +21,13 @@ COLORS = {
 class GraderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("程式評分系統")
+        self.root.title("Judge system")
         self.root.geometry("900x950")
         self.root.configure(bg=COLORS["bg"])
         self.grading = False
         
-        self.default_font = ("Microsoft JhengHei", 12)
-        self.title_font = ("Microsoft JhengHei", 14, "bold")
+        self.default_font = ("Segoe UI", 12)
+        self.title_font = ("Segoe UI", 14, "bold")
         
         self._setup_styles()
         self._setup_ui()
@@ -40,44 +41,41 @@ class GraderApp:
     def _setup_ui(self):
         header = tk.Frame(self.root, bg=COLORS["primary"], height=60)
         header.pack(fill=tk.X)
-        tk.Label(header, text="程式評分系統", bg=COLORS["primary"], 
-                 fg="white", font=("Microsoft JhengHei", 16, "bold"), pady=15).pack()
+        tk.Label(header, text="Code Grading System", bg=COLORS["primary"], 
+                 fg="white", font=("Segoe UI", 16, "bold"), pady=15).pack()
 
         container = tk.Frame(self.root, bg=COLORS["bg"], padx=30, pady=20)
         container.pack(fill=tk.BOTH, expand=True)
 
-        # 檔案路徑設定
-        self._create_section(container, "資源路徑設定", [
-            ("測試資料 (.md):", "test_path", "瀏覽", lambda: self.browse_file(self.test_path, [("Markdown files", "*.md")])),
-            ("目標程式 (.py):", "script_path", "瀏覽", lambda: self.browse_file(self.script_path, [("Python files", "*.py")]))
+        self._create_section(container, "Path", [
+            ("Test Data (.md):", "test_path", "Browse", lambda: self.browse_file(self.test_path, [("Markdown files", "*.md")])),
+            ("Target Script (.py):", "script_path", "Browse", lambda: self.browse_file(self.script_path, [("Python files", "*.py")]))
         ])
 
-        # 競賽參數設定
-        settings_frame = tk.LabelFrame(container, text="競賽參數", bg=COLORS["bg"], 
+        settings_frame = tk.LabelFrame(container, text="Properties", bg=COLORS["bg"], 
                                       font=self.title_font, padx=15, pady=15, fg=COLORS["primary"])
         settings_frame.pack(fill=tk.X, pady=10)
 
-        tk.Label(settings_frame, text="執行限時 (秒):").grid(row=0, column=0, sticky="w", pady=5)
+        tk.Label(settings_frame, text="Time Limit (sec):").grid(row=0, column=0, sticky="w", pady=5)
         self.time_limit_entry = tk.Entry(settings_frame, width=10, font=self.default_font)
         self.time_limit_entry.insert(0, "10.0")
         self.time_limit_entry.grid(row=0, column=1, padx=10, sticky="w")
 
-        # 控制按鈕
+        # Control btns
         btn_frame = tk.Frame(container, bg=COLORS["bg"])
         btn_frame.pack(fill=tk.X, pady=15)
 
-        self.run_btn = tk.Button(btn_frame, text="開始評分 (Start)", bg=COLORS["primary"], fg="white",
+        self.run_btn = tk.Button(btn_frame, text="Start Grading", bg=COLORS["primary"], fg="white",
                                  font=self.title_font, relief="flat", padx=30, pady=10, 
                                  cursor="hand2", command=self.start_grading_thread)
         self.run_btn.pack(side=tk.LEFT, padx=5)
 
-        self.clear_btn = tk.Button(btn_frame, text="清空日誌", bg="#95a5a6", fg="white",
+        self.clear_btn = tk.Button(btn_frame, text="Clear Logs", bg="#95a5a6", fg="white",
                                    font=self.title_font, relief="flat", padx=20, pady=10, 
                                    cursor="hand2", command=self.clear_log_area)
         self.clear_btn.pack(side=tk.LEFT, padx=5)
 
-        # 輸出日誌區
-        report_frame = tk.LabelFrame(container, text="評分輸出診斷", bg=COLORS["bg"], 
+        report_frame = tk.LabelFrame(container, text="Output", bg=COLORS["bg"], 
                                     font=self.title_font, padx=10, pady=10, fg=COLORS["primary"])
         report_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -119,14 +117,14 @@ class GraderApp:
             limit = float(self.time_limit_entry.get())
             if limit <= 0: raise ValueError
         except ValueError:
-            messagebox.showerror("錯誤", "無效的時間限制！請輸入正數。")
+            messagebox.showerror("Error", "Invalid time limit! Please enter a positive number.")
             return
 
         if not os.path.exists(script) or not os.path.exists(test_file):
-            messagebox.showerror("錯誤", "檔案路徑不正確！")
+            messagebox.showerror("Error", "Invalid file paths!")
             return
         
-        self.run_btn.config(state=tk.DISABLED, text="評分中...")
+        self.run_btn.config(state=tk.DISABLED, text="Grading...")
         self.clear_btn.config(state=tk.DISABLED)
         self.log_area.delete(1.0, tk.END)
         self.grading = True
@@ -136,24 +134,71 @@ class GraderApp:
         if not self.grading:
             self.log_area.delete(1.0, tk.END)
 
+    def _eval_single_testcase(self, case_id, inp, exp, python_exe, runner_code, script_name, timeout_limit, env):
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        status = ""
+        actual = ""
+        duration = 0.0
+
+        try:
+            process = subprocess.Popen(
+                [python_exe, "-c", runner_code, script_name],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                creationflags=creationflags
+            )
+            try:
+                stdout, stderr = process.communicate(input=inp, timeout=timeout_limit)
+                
+                if "__TIME__:" in stdout:
+                    raw_output, time_part = stdout.rsplit("__TIME__:", 1)
+                    actual = raw_output.rstrip("\r\n")
+                    duration = float(time_part.strip())
+                else:
+                    actual = stdout.strip()
+                    duration = 0.0
+
+                if actual == exp:
+                    status = "✅ PASS"
+                    is_passed = True
+                else:
+                    status = "❌ FAIL"
+                    is_passed = False
+            except subprocess.TimeoutExpired:
+                process.kill()
+                status = "❌ TIMEOUT"
+                duration = timeout_limit
+                is_passed = False
+        except Exception as e:
+            status = "❌ ERROR"
+            is_passed = False
+
+        return case_id, status, duration, is_passed
+
     def run_grader(self, script_name, test_file, timeout_limit):
         try:
             with open(test_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             segments = re.findall(r'// input\n(.*?)\n// output\n(.*?)(?=\n// input|\Z)', content, re.DOTALL)
             if not segments:
-                self.log("警告：找不到任何測試資料。")
+                self.log("Warning: No test cases found.")
                 self._finish_grading()
                 return
         except Exception as e:
-            self.log(f"讀取測試檔錯誤: {str(e)}")
+            self.log(f"Error reading test file: {str(e)}")
             self._finish_grading()
             return
 
         total_cases = len(segments)
         passed_count = 0
-        self.log(f"測試對象: {os.path.basename(script_name)}")
-        self.log(f"時間限制: {timeout_limit}s")
+        self.log(f"Target Script: {os.path.basename(script_name)}")
+        self.log(f"Time Limit: {timeout_limit}s")
         self.log("-" * 60)
 
         if getattr(sys, 'frozen', False):
@@ -174,55 +219,31 @@ class GraderApp:
             "print(f'\\n__TIME__:{t1 - t0:.6f}')"
         )
 
-        for i, (inp, exp) in enumerate(segments):
-            inp, exp = inp.strip(), exp.strip()
-            status = ""
-            actual = ""
-            duration = 0.0
-
-            try:
-                process = subprocess.Popen(
-                    [python_exe, "-c", runner_code, script_name],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    env=env
+        max_workers = min(8, os.cpu_count() or 4)
+        
+        futures = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for i, (inp, exp) in enumerate(segments):
+                inp, exp = inp.strip(), exp.strip()
+                future = executor.submit(
+                    self._eval_single_testcase,
+                    i + 1, inp, exp, python_exe, runner_code, script_name, timeout_limit, env
                 )
-                try:
-                    stdout, stderr = process.communicate(input=inp, timeout=timeout_limit)
-                    
-                    if "__TIME__:" in stdout:
-                        raw_output, time_part = stdout.rsplit("__TIME__:", 1)
-                        actual = raw_output.rstrip("\r\n")
-                        duration = float(time_part.strip())
-                    else:
-                        actual = stdout.strip()
-                        duration = 0.0
+                futures.append(future)
 
-                    if actual == exp:
-                        status = "✅ PASS"
-                        passed_count += 1
-                    else:
-                        status = "❌ FAIL"
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    status = "❌ TIMEOUT"
-                    duration = timeout_limit
-                    actual = "Execution Timed Out"
-            except Exception as e:
-                status = "❌ ERROR"
-                actual = str(e)
-
-            self.log(f"#{i+1:<7} | {status:<10} | {duration:<10.4f}s")
+            for future in as_completed(futures):
+                case_id, status, duration, is_passed = future.result()
+                if is_passed:
+                    passed_count += 1
+                self.log(f"#{case_id:<7} | {status:<10} | {duration:<10.4f}s")
 
         self.log("-" * 60)
-        self.log(f"總計通過: {passed_count}/{total_cases}")
+        self.log(f"Total Passed: {passed_count}/{total_cases}")
 
         self._finish_grading()
 
     def _finish_grading(self):
-        self.run_btn.config(state=tk.NORMAL, text="開始評分 (Start)")
+        self.run_btn.config(state=tk.NORMAL, text="Start Grading")
         self.clear_btn.config(state=tk.NORMAL)
         self.grading = False
 
